@@ -146,6 +146,35 @@ class UsuarioServiceTest {
 		}
 
 		@Test
+		@DisplayName("Debe permitir el login si el bloqueo ya venció")
+		void login_BloqueoVencido_Exito() {
+			usuarioEjemplo.setIntentosFallidos(UsuarioService.MAX_INTENTOS);
+			usuarioEjemplo.setUltimoIntento(LocalDateTime.now().minusMinutes(UsuarioService.MINUTOS_BLOQUEO + 1));
+			when(usuarioRepository.findByCorreo("sakura@test.com")).thenReturn(Optional.of(usuarioEjemplo));
+			when(usuarioRepository.save(any(Usuario.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+			Usuario resultado = usuarioService.login("sakura@test.com", "password123");
+
+			assertThat(resultado.getToken()).isNotNull();
+			assertThat(resultado.getIntentosFallidos()).isZero();
+			verify(usuarioRepository).save(usuarioEjemplo);
+		}
+
+		@Test
+		@DisplayName("Debe permitir el login si hay muchos intentos pero no hay fecha del último")
+		void login_IntentosSinFecha_Exito() {
+			usuarioEjemplo.setIntentosFallidos(UsuarioService.MAX_INTENTOS);
+			usuarioEjemplo.setUltimoIntento(null);
+			when(usuarioRepository.findByCorreo("sakura@test.com")).thenReturn(Optional.of(usuarioEjemplo));
+			when(usuarioRepository.save(any(Usuario.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+			Usuario resultado = usuarioService.login("sakura@test.com", "password123");
+
+			assertThat(resultado.getIntentosFallidos()).isZero();
+			verify(usuarioRepository).save(usuarioEjemplo);
+		}
+
+		@Test
 		@DisplayName("Debe denegar login si el usuario se encuentra en periodo de bloqueo")
 		void login_UsuarioBloqueado_LanzaExcepcion() {
 			usuarioEjemplo.setIntentosFallidos(UsuarioService.MAX_INTENTOS);
@@ -197,6 +226,17 @@ class UsuarioServiceTest {
 			Usuario resultado = usuarioService.buscarPorToken("valid-token");
 
 			assertThat(resultado).isEqualTo(usuarioEjemplo);
+			verify(usuarioRepository).findByToken("valid-token");
+		}
+
+		@Test
+		@DisplayName("Debe lanzar RecursoNoEncontradoException si el token de sesión no existe")
+		void buscarPorToken_Inexistente_LanzaExcepcion() {
+			when(usuarioRepository.findByToken("nadie")).thenReturn(Optional.empty());
+
+			assertThatThrownBy(() -> usuarioService.buscarPorToken("nadie"))
+					.isInstanceOf(RecursoNoEncontradoException.class)
+					.hasMessage("La sesión no es válida");
 		}
 	}
 
@@ -226,6 +266,18 @@ class UsuarioServiceTest {
 			when(usuarioRepository.findByCorreo("nadie@test.com")).thenReturn(Optional.empty());
 
 			String mensaje = usuarioService.recuperar("nadie@test.com");
+
+			assertThat(mensaje).isEqualTo(UsuarioService.MENSAJE_RECUPERAR);
+			verify(usuarioRepository, never()).save(any());
+		}
+
+		@Test
+		@DisplayName("Debe retornar el mensaje genérico sin guardar si el usuario está inactivo")
+		void recuperar_UsuarioInactivo_RetornaMensajeSinGuardar() {
+			usuarioEjemplo.setActivo(false);
+			when(usuarioRepository.findByCorreo("sakura@test.com")).thenReturn(Optional.of(usuarioEjemplo));
+
+			String mensaje = usuarioService.recuperar("sakura@test.com");
 
 			assertThat(mensaje).isEqualTo(UsuarioService.MENSAJE_RECUPERAR);
 			verify(usuarioRepository, never()).save(any());
@@ -262,6 +314,29 @@ class UsuarioServiceTest {
 			assertThatThrownBy(() -> usuarioService.restablecer(token, "nuevaClave123"))
 					.isInstanceOf(ReglaNegocioException.class)
 					.hasMessage("El enlace de recuperación venció");
+			verify(usuarioRepository, never()).save(any());
+		}
+
+		@Test
+		@DisplayName("Debe lanzar ReglaNegocioException si el enlace no tiene fecha de vencimiento")
+		void restablecer_SinFechaDeVencimiento_LanzaExcepcion() {
+			usuarioEjemplo.setTokenRecuperacion("token-sin-fecha");
+			usuarioEjemplo.setTokenRecuperacionExpira(null);
+			when(usuarioRepository.findByTokenRecuperacion("token-sin-fecha")).thenReturn(Optional.of(usuarioEjemplo));
+
+			assertThatThrownBy(() -> usuarioService.restablecer("token-sin-fecha", "nuevaClave123"))
+					.isInstanceOf(ReglaNegocioException.class)
+					.hasMessage("El enlace de recuperación venció");
+		}
+
+		@Test
+		@DisplayName("Debe lanzar ReglaNegocioException si el enlace de recuperación no existe")
+		void restablecer_TokenInvalido_LanzaExcepcion() {
+			when(usuarioRepository.findByTokenRecuperacion("no-existe")).thenReturn(Optional.empty());
+
+			assertThatThrownBy(() -> usuarioService.restablecer("no-existe", "nuevaClave123"))
+					.isInstanceOf(ReglaNegocioException.class)
+					.hasMessage("El enlace de recuperación no es válido");
 		}
 	}
 
@@ -297,6 +372,21 @@ class UsuarioServiceTest {
 
 			assertThat(resultado.getRol()).isEqualTo("ADMIN");
 			assertThat(resultado.isActivo()).isTrue();
+			verify(usuarioRepository).save(nuevoAdmin);
+		}
+
+		@Test
+		@DisplayName("Debe lanzar ReglaNegocioException si el correo del nuevo admin ya existe")
+		void crearAdmin_CorreoDuplicado_LanzaExcepcion() {
+			when(usuarioRepository.findByToken("admin-token")).thenReturn(Optional.of(admin));
+			when(usuarioRepository.existsByCorreo("nuevo@admin.com")).thenReturn(true);
+			Usuario nuevoAdmin = new Usuario();
+			nuevoAdmin.setCorreo("nuevo@admin.com");
+
+			assertThatThrownBy(() -> usuarioService.crearAdmin("admin-token", nuevoAdmin))
+					.isInstanceOf(ReglaNegocioException.class)
+					.hasMessage("El correo ya está registrado");
+			verify(usuarioRepository, never()).save(any());
 		}
 
 		@Test
@@ -305,6 +395,35 @@ class UsuarioServiceTest {
 			assertThatThrownBy(() -> usuarioService.crearAdmin(null, usuarioEjemplo))
 					.isInstanceOf(NoAutenticadoException.class)
 					.hasMessage("Debe iniciar sesión");
+		}
+
+		@Test
+		@DisplayName("Debe lanzar NoAutenticadoException si el token está en blanco")
+		void crearAdmin_TokenEnBlanco_LanzaExcepcion() {
+			assertThatThrownBy(() -> usuarioService.crearAdmin("   ", usuarioEjemplo))
+					.isInstanceOf(NoAutenticadoException.class)
+					.hasMessage("Debe iniciar sesión");
+		}
+
+		@Test
+		@DisplayName("Debe lanzar NoAutenticadoException si el token no corresponde a una sesión")
+		void crearAdmin_TokenDesconocido_LanzaExcepcion() {
+			when(usuarioRepository.findByToken("desconocido")).thenReturn(Optional.empty());
+
+			assertThatThrownBy(() -> usuarioService.crearAdmin("desconocido", usuarioEjemplo))
+					.isInstanceOf(NoAutenticadoException.class)
+					.hasMessage("Debe iniciar sesión");
+		}
+
+		@Test
+		@DisplayName("Debe lanzar AccesoDenegadoException si el administrador está inactivo")
+		void crearAdmin_AdminInactivo_LanzaExcepcion() {
+			admin.setActivo(false);
+			when(usuarioRepository.findByToken("admin-token")).thenReturn(Optional.of(admin));
+
+			assertThatThrownBy(() -> usuarioService.crearAdmin("admin-token", new Usuario()))
+					.isInstanceOf(AccesoDenegadoException.class)
+					.hasMessage("No tiene permiso para esta acción");
 		}
 
 		@Test
@@ -331,6 +450,34 @@ class UsuarioServiceTest {
 
 			assertThat(resultado.isActivo()).isFalse();
 			assertThat(resultado.getToken()).isNull();
+			verify(usuarioRepository).save(usuarioEjemplo);
+		}
+
+		@Test
+		@DisplayName("Debe activar un usuario sin borrar su token")
+		void cambiarActivo_ActivarUsuario_ConservaToken() {
+			when(usuarioRepository.findByToken("admin-token")).thenReturn(Optional.of(admin));
+			usuarioEjemplo.setActivo(false);
+			usuarioEjemplo.setToken("session-token");
+			when(usuarioRepository.findById(1L)).thenReturn(Optional.of(usuarioEjemplo));
+			when(usuarioRepository.save(any(Usuario.class))).thenAnswer(i -> i.getArgument(0));
+
+			Usuario resultado = usuarioService.cambiarActivo("admin-token", 1L, true);
+
+			assertThat(resultado.isActivo()).isTrue();
+			assertThat(resultado.getToken()).isEqualTo("session-token");
+			verify(usuarioRepository).save(usuarioEjemplo);
+		}
+
+		@Test
+		@DisplayName("Debe lanzar RecursoNoEncontradoException si el usuario a modificar no existe")
+		void cambiarActivo_UsuarioInexistente_LanzaExcepcion() {
+			when(usuarioRepository.findByToken("admin-token")).thenReturn(Optional.of(admin));
+			when(usuarioRepository.findById(50L)).thenReturn(Optional.empty());
+
+			assertThatThrownBy(() -> usuarioService.cambiarActivo("admin-token", 50L, false))
+					.isInstanceOf(RecursoNoEncontradoException.class)
+					.hasMessage("No existe el usuario");
 		}
 	}
 
@@ -399,8 +546,31 @@ class UsuarioServiceTest {
 			usuarioEjemplo.setToken("token-usuario");
 			when(usuarioRepository.findByToken("token-usuario")).thenReturn(Optional.of(usuarioEjemplo));
 
-			// No debe lanzar excepciones
 			usuarioService.verificarClave("token-usuario", "password123");
+			verify(usuarioRepository).findByToken("token-usuario");
+		}
+
+		@Test
+		@DisplayName("Debe lanzar CredencialesInvalidasException si la clave no coincide")
+		void verificarClave_ClaveIncorrecta_LanzaExcepcion() {
+			usuarioEjemplo.setToken("token-usuario");
+			when(usuarioRepository.findByToken("token-usuario")).thenReturn(Optional.of(usuarioEjemplo));
+
+			assertThatThrownBy(() -> usuarioService.verificarClave("token-usuario", "otra"))
+					.isInstanceOf(CredencialesInvalidasException.class)
+					.hasMessage(UsuarioService.MENSAJE_CREDENCIALES);
+		}
+
+		@Test
+		@DisplayName("Debe lanzar CredencialesInvalidasException si el usuario está inactivo")
+		void verificarClave_UsuarioInactivo_LanzaExcepcion() {
+			usuarioEjemplo.setToken("token-usuario");
+			usuarioEjemplo.setActivo(false);
+			when(usuarioRepository.findByToken("token-usuario")).thenReturn(Optional.of(usuarioEjemplo));
+
+			assertThatThrownBy(() -> usuarioService.verificarClave("token-usuario", "password123"))
+					.isInstanceOf(CredencialesInvalidasException.class)
+					.hasMessage(UsuarioService.MENSAJE_CREDENCIALES);
 		}
 	}
 }
